@@ -1,0 +1,4 @@
+node_modules/
+*.log
+kymra-sarah-knowledge-base-v*.txt
+.env
