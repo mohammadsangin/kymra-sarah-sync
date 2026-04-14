@@ -6,12 +6,12 @@ const https = require('https');
 
 // ── Credentials (set these as environment variables) ─────────────────────────
 // Read at call time inside runSync() so module import never throws
-const SHOPIFY_STORE     = () => process.env.SHOPIFY_STORE || 'eqjwir-jc.myshopify.com';
-const SHOPIFY_CLIENT_ID = () => process.env.SHOPIFY_CLIENT_ID;
-const SHOPIFY_SECRET    = () => process.env.SHOPIFY_CLIENT_SECRET;
-const VAPI_KEY          = () => process.env.VAPI_API_KEY;
-const VAPI_ASSISTANT    = () => process.env.VAPI_ASSISTANT_ID || 'f67cfb35-5f40-430d-b70f-718940af7a43';
-const VAPI_OLD_FILE     = () => process.env.VAPI_OLD_FILE_ID || '';
+const SHOPIFY_STORE     = () => (process.env.SHOPIFY_STORE || 'eqjwir-jc.myshopify.com').trim();
+const SHOPIFY_CLIENT_ID = () => (process.env.SHOPIFY_CLIENT_ID || '').trim();
+const SHOPIFY_SECRET    = () => (process.env.SHOPIFY_CLIENT_SECRET || '').trim();
+const VAPI_KEY          = () => (process.env.VAPI_API_KEY || '').trim();
+const VAPI_ASSISTANT    = () => (process.env.VAPI_ASSISTANT_ID || 'f67cfb35-5f40-430d-b70f-718940af7a43').trim();
+const VAPI_OLD_FILE     = () => (process.env.VAPI_OLD_FILE_ID || '').trim();
 
 // Vercel runtime is read-only except /tmp; fall back gracefully
 const OUTPUT_FILE = process.env.VERCEL
