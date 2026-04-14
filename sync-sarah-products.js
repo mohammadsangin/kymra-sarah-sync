@@ -1,32 +1,29 @@
 'use strict';
 
-const fs   = require('fs');
-const path = require('path');
+const fs    = require('fs');
+const path  = require('path');
 const https = require('https');
 
 // ── Credentials (set these as environment variables) ─────────────────────────
-const SHOPIFY_STORE         = process.env.SHOPIFY_STORE         || 'eqjwir-jc.myshopify.com';
-const SHOPIFY_CLIENT_ID     = process.env.SHOPIFY_CLIENT_ID;
-const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
-const VAPI_API_KEY          = process.env.VAPI_API_KEY;
-const VAPI_ASSISTANT_ID     = process.env.VAPI_ASSISTANT_ID     || 'f67cfb35-5f40-430d-b70f-718940af7a43';
-const VAPI_OLD_FILE_ID      = process.env.VAPI_OLD_FILE_ID      || '';
-const OUTPUT_FILE           = path.join(__dirname, 'kymra-sarah-knowledge-base-v7.txt');
+// Read at call time inside runSync() so module import never throws
+const SHOPIFY_STORE     = () => process.env.SHOPIFY_STORE || 'eqjwir-jc.myshopify.com';
+const SHOPIFY_CLIENT_ID = () => process.env.SHOPIFY_CLIENT_ID;
+const SHOPIFY_SECRET    = () => process.env.SHOPIFY_CLIENT_SECRET;
+const VAPI_KEY          = () => process.env.VAPI_API_KEY;
+const VAPI_ASSISTANT    = () => process.env.VAPI_ASSISTANT_ID || 'f67cfb35-5f40-430d-b70f-718940af7a43';
+const VAPI_OLD_FILE     = () => process.env.VAPI_OLD_FILE_ID || '';
 
-// Validate required env vars
-const REQUIRED = { SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, VAPI_API_KEY };
-const missing  = Object.entries(REQUIRED).filter(([, v]) => !v).map(([k]) => k);
-if (missing.length) {
-  console.error(`✗ Missing required environment variables: ${missing.join(', ')}`);
-  process.exit(1);
-}
+// Vercel runtime is read-only except /tmp; fall back gracefully
+const OUTPUT_FILE = process.env.VERCEL
+  ? '/tmp/kymra-sarah-knowledge-base-v7.txt'
+  : path.join(__dirname, 'kymra-sarah-knowledge-base-v7.txt');
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 
 function httpsRequest(url, options = {}, body = null) {
   return new Promise((resolve, reject) => {
-    const parsed   = new URL(url);
-    const reqOpts  = {
+    const parsed  = new URL(url);
+    const reqOpts = {
       hostname : parsed.hostname,
       path     : parsed.pathname + parsed.search,
       method   : options.method || 'GET',
@@ -88,19 +85,18 @@ function multipartRequest(url, authHeader, fileName, fileContent) {
   });
 }
 
-// ── Step 1: Get Shopify access token via client_credentials grant ─────────────
+// ── Step 1: Shopify access token ──────────────────────────────────────────────
 
 async function getShopifyToken() {
-  console.log('Step 1 — Getting Shopify access token (client_credentials grant)...');
-
+  console.log('Step 1 — Getting Shopify access token...');
   const formBody = new URLSearchParams({
     grant_type    : 'client_credentials',
-    client_id     : SHOPIFY_CLIENT_ID,
-    client_secret : SHOPIFY_CLIENT_SECRET,
+    client_id     : SHOPIFY_CLIENT_ID(),
+    client_secret : SHOPIFY_SECRET(),
   }).toString();
 
   const res = await httpsRequest(
-    `https://${SHOPIFY_STORE}/admin/oauth/access_token`,
+    `https://${SHOPIFY_STORE()}/admin/oauth/access_token`,
     {
       method  : 'POST',
       headers : {
@@ -115,20 +111,16 @@ async function getShopifyToken() {
   try { data = JSON.parse(res.body); } catch (_) { data = {}; }
 
   if (res.status !== 200 || !data.access_token) {
-    throw new Error(
-      `Token request failed — HTTP ${res.status}\n` +
-      `Response: ${res.body}\n\n` +
-      `Check that the Shopify app has the read_products scope and the credentials are correct.`
-    );
+    throw new Error(`Token request failed — HTTP ${res.status}: ${res.body}`);
   }
 
-  console.log(`  ✓ Token obtained (scope: ${data.scope}, expires_in: ${data.expires_in}s)`);
+  console.log(`  ✓ Token obtained (scope: ${data.scope})`);
   return data.access_token;
 }
 
-// ── Step 2: Fetch all active products via GraphQL with cursor pagination ───────
+// ── Step 2: Fetch products via GraphQL ───────────────────────────────────────
 
-const GQL_QUERY = /* graphql */ `
+const GQL_QUERY = `
   query GetProducts($first: Int!, $after: String) {
     products(first: $first, after: $after, query: "status:active") {
       edges {
@@ -138,33 +130,24 @@ const GQL_QUERY = /* graphql */ `
           productType
           tags
           priceRangeV2 {
-            minVariantPrice {
-              amount
-            }
+            minVariantPrice { amount }
           }
         }
       }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
+      pageInfo { hasNextPage endCursor }
     }
   }
 `;
 
 async function fetchAllProducts(token) {
-  console.log('Step 2 — Fetching active products via Shopify GraphQL 2025-01...');
-  const endpoint = `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`;
-  const allNodes  = [];
-  let cursor      = null;
-  let page        = 1;
+  console.log('Step 2 — Fetching products via Shopify GraphQL 2025-01...');
+  const endpoint = `https://${SHOPIFY_STORE()}/admin/api/2025-01/graphql.json`;
+  const allNodes = [];
+  let cursor     = null;
+  let page       = 1;
 
   while (true) {
-    const payload = JSON.stringify({
-      query     : GQL_QUERY,
-      variables : { first: 250, after: cursor },
-    });
-
+    const payload = JSON.stringify({ query: GQL_QUERY, variables: { first: 250, after: cursor } });
     const res = await httpsRequest(endpoint, {
       method  : 'POST',
       headers : {
@@ -174,80 +157,66 @@ async function fetchAllProducts(token) {
       },
     }, payload);
 
-    if (res.status !== 200) {
-      throw new Error(`GraphQL request failed — HTTP ${res.status}\n${res.body}`);
-    }
-
+    if (res.status !== 200) throw new Error(`GraphQL failed — HTTP ${res.status}\n${res.body}`);
     const json = JSON.parse(res.body);
-
-    if (json.errors) {
-      throw new Error(`GraphQL errors: ${JSON.stringify(json.errors, null, 2)}`);
-    }
+    if (json.errors) throw new Error(`GraphQL errors: ${JSON.stringify(json.errors)}`);
 
     const { edges, pageInfo } = json.data.products;
     for (const { node } of edges) allNodes.push(node);
-    console.log(`  Page ${page}: fetched ${edges.length} products (total so far: ${allNodes.length})`);
+    console.log(`  Page ${page}: ${edges.length} products (total: ${allNodes.length})`);
 
     if (!pageInfo.hasNextPage) break;
     cursor = pageInfo.endCursor;
     page++;
   }
 
-  console.log(`  ✓ Total active products: ${allNodes.length}`);
+  console.log(`  ✓ Total: ${allNodes.length} active products`);
   return allNodes;
 }
 
-// ── Step 3: Room suitability from tags ────────────────────────────────────────
+// ── Step 3: Room mapping ──────────────────────────────────────────────────────
 
 function getRooms(tags, title, productType) {
-  const source = `${Array.isArray(tags) ? tags.join(' ') : tags} ${title} ${productType}`.toLowerCase();
-  const rooms  = [];
-
-  if (/bathroom|ip44|ip65|ip-44|ip-65/.test(source)) rooms.push('Bathroom');
-  if (/outdoor/.test(source))                          rooms.push('Outdoor');
-  if (/bedroom/.test(source))                          rooms.push('Bedroom');
-  if (/kitchen/.test(source))                          rooms.push('Kitchen');
-  if (/living/.test(source))                           rooms.push('Living Room');
-  if (/hallway|hall/.test(source))                     rooms.push('Hallway');
-  if (/dining/.test(source))                           rooms.push('Dining Room');
-  if (/study/.test(source))                            rooms.push('Study');
-  if (/entrance/.test(source))                         rooms.push('Entrance Hall');
-  if (/stairwell|staircase|landing/.test(source))      rooms.push('Stairwell');
-  if (/porch/.test(source))                            rooms.push('Porch');
-
+  const src  = `${Array.isArray(tags) ? tags.join(' ') : tags} ${title} ${productType}`.toLowerCase();
+  const rooms = [];
+  if (/bathroom|ip44|ip65|ip-44|ip-65/.test(src)) rooms.push('Bathroom');
+  if (/outdoor/.test(src))                          rooms.push('Outdoor');
+  if (/bedroom/.test(src))                          rooms.push('Bedroom');
+  if (/kitchen/.test(src))                          rooms.push('Kitchen');
+  if (/living/.test(src))                           rooms.push('Living Room');
+  if (/hallway|hall/.test(src))                     rooms.push('Hallway');
+  if (/dining/.test(src))                           rooms.push('Dining Room');
+  if (/study/.test(src))                            rooms.push('Study');
+  if (/entrance/.test(src))                         rooms.push('Entrance Hall');
+  if (/stairwell|staircase|landing/.test(src))      rooms.push('Stairwell');
+  if (/porch/.test(src))                            rooms.push('Porch');
   return rooms.length > 0 ? rooms : ['Living Room', 'Bedroom', 'Hallway', 'Kitchen'];
 }
 
-// ── Step 4: Category from productType / title / tags ─────────────────────────
+// ── Step 4: Category mapping ──────────────────────────────────────────────────
 
 function getCategory(productType, title, tags) {
-  const source = `${productType} ${title} ${Array.isArray(tags) ? tags.join(' ') : tags}`.toLowerCase();
-
-  if (/pendant|hanging/.test(source))                                         return 'PENDANTS & CEILING LIGHTS';
-  if (/ceiling/.test(source) && !/ip65|ip44|ip-65|ip-44/.test(source))       return 'PENDANTS & CEILING LIGHTS';
-  if (/ip65|ip44|ip-65|ip-44|bulkhead|outdoor/.test(source))                  return 'BATHROOM & OUTDOOR IP-RATED LIGHTS';
-  if (/wall\s*light|wall-light/.test(source))                                 return 'WALL LIGHTS';
-  if (/wall/.test(source) && /light/.test(source))                            return 'WALL LIGHTS';
-  if (/socket|switch|dimmer|usb|aerial|toggle|plug/.test(source))             return 'SWITCHES & SOCKETS';
-
+  const src = `${productType} ${title} ${Array.isArray(tags) ? tags.join(' ') : tags}`.toLowerCase();
+  if (/pendant|hanging/.test(src))                                   return 'PENDANTS & CEILING LIGHTS';
+  if (/ceiling/.test(src) && !/ip65|ip44|ip-65|ip-44/.test(src))    return 'PENDANTS & CEILING LIGHTS';
+  if (/ip65|ip44|ip-65|ip-44|bulkhead|outdoor/.test(src))            return 'BATHROOM & OUTDOOR IP-RATED LIGHTS';
+  if (/wall\s*light|wall-light/.test(src))                           return 'WALL LIGHTS';
+  if (/wall/.test(src) && /light/.test(src))                         return 'WALL LIGHTS';
+  if (/socket|switch|dimmer|usb|aerial|toggle|plug/.test(src))       return 'SWITCHES & SOCKETS';
   return 'OTHER';
 }
 
-// ── Step 5: Build knowledge base file ────────────────────────────────────────
+// ── Step 5: Build KB file ─────────────────────────────────────────────────────
 
 function buildKnowledgeBase(products) {
   console.log('Step 5 — Building knowledge base...');
-
-  const today = new Date().toLocaleDateString('en-GB', {
-    day: 'numeric', month: 'long', year: 'numeric',
-  });
-
+  const today = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
   const categories = {
-    'PENDANTS & CEILING LIGHTS'       : [],
-    'WALL LIGHTS'                     : [],
+    'PENDANTS & CEILING LIGHTS'          : [],
+    'WALL LIGHTS'                        : [],
     'BATHROOM & OUTDOOR IP-RATED LIGHTS' : [],
-    'SWITCHES & SOCKETS'              : [],
-    'OTHER'                           : [],
+    'SWITCHES & SOCKETS'                 : [],
+    'OTHER'                              : [],
   };
 
   for (const node of products) {
@@ -257,17 +226,10 @@ function buildKnowledgeBase(products) {
     const url         = `https://kymralighting.co.uk/products/${handle}`;
     const tags        = node.tags || [];
     const productType = node.productType || '';
-    const rooms       = getRooms(tags, title, productType);
-    const category    = getCategory(productType, title, tags);
-
-    categories[category].push({ title, price, rooms, url });
+    categories[getCategory(productType, title, tags)].push({
+      title, price, rooms: getRooms(tags, title, productType), url,
+    });
   }
-
-  let content = `KYMRA LIGHTING – PRODUCT KNOWLEDGE BASE v7\n`;
-  content    += `Last Updated: ${today}\n`;
-  content    += `Total Active Products: ${products.length}\n`;
-  content    += `Website: https://kymralighting.co.uk\n`;
-  content    += `Auto-generated from live Shopify store\n\n---\n`;
 
   const ORDER = [
     'PENDANTS & CEILING LIGHTS',
@@ -276,6 +238,10 @@ function buildKnowledgeBase(products) {
     'SWITCHES & SOCKETS',
     'OTHER',
   ];
+
+  let content = `KYMRA LIGHTING – PRODUCT KNOWLEDGE BASE v7\nLast Updated: ${today}\n`;
+  content    += `Total Active Products: ${products.length}\nWebsite: https://kymralighting.co.uk\n`;
+  content    += `Auto-generated from live Shopify store\n\n---\n`;
 
   const breakdown = {};
   for (const cat of ORDER) {
@@ -298,27 +264,23 @@ function buildKnowledgeBase(products) {
   return { content, breakdown };
 }
 
-// ── Step 6: Upload file to Vapi ───────────────────────────────────────────────
+// ── Step 6: Upload to Vapi ────────────────────────────────────────────────────
 
 async function uploadToVapi(fileContent) {
   console.log('Step 6 — Uploading to Vapi...');
   const res = await multipartRequest(
     'https://api.vapi.ai/file',
-    `Bearer ${VAPI_API_KEY}`,
+    `Bearer ${VAPI_KEY()}`,
     'kymra-sarah-knowledge-base-v7.txt',
     fileContent
   );
-
-  if (res.status !== 201) {
-    throw new Error(`Vapi upload failed — HTTP ${res.status}\n${res.body}`);
-  }
-
+  if (res.status !== 201) throw new Error(`Vapi upload failed — HTTP ${res.status}\n${res.body}`);
   const data = JSON.parse(res.body);
   console.log(`  ✓ Uploaded — new file ID: ${data.id}`);
   return data.id;
 }
 
-// ── Step 7: PATCH assistant — swap file IDs ───────────────────────────────────
+// ── Step 7: PATCH assistant ───────────────────────────────────────────────────
 
 async function patchAssistant(newFileId) {
   console.log('Step 7 — Patching Sarah assistant...');
@@ -329,62 +291,82 @@ async function patchAssistant(newFileId) {
       knowledgeBase : { fileIds: [newFileId], provider: 'google' },
     },
   });
-
   const res = await httpsRequest(
-    `https://api.vapi.ai/assistant/${VAPI_ASSISTANT_ID}`,
+    `https://api.vapi.ai/assistant/${VAPI_ASSISTANT()}`,
     {
       method  : 'PATCH',
       headers : {
-        Authorization    : `Bearer ${VAPI_API_KEY}`,
+        Authorization    : `Bearer ${VAPI_KEY()}`,
         'Content-Type'   : 'application/json',
         'Content-Length' : Buffer.byteLength(payload),
       },
     },
     payload
   );
-
-  if (res.status !== 200) {
-    throw new Error(`Vapi PATCH failed — HTTP ${res.status}\n${res.body}`);
-  }
-
-  const data         = JSON.parse(res.body);
-  const attachedIds  = data.model?.knowledgeBase?.fileIds || [];
-  console.log(`  ✓ PATCH ${res.status} — KB files now: ${JSON.stringify(attachedIds)}`);
-  return res.status;
+  if (res.status !== 200) throw new Error(`Vapi PATCH failed — HTTP ${res.status}\n${res.body}`);
+  const attached = JSON.parse(res.body).model?.knowledgeBase?.fileIds || [];
+  console.log(`  ✓ PATCH 200 — KB files: ${JSON.stringify(attached)}`);
+  return { status: res.status, newFileId };
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ── Exported runSync (used by Vercel api/sync.js) ─────────────────────────────
 
-async function main() {
-  const t0 = Date.now();
+async function runSync() {
+  // Validate env vars at call time, not at import time
+  const missing = ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET', 'VAPI_API_KEY']
+    .filter(k => !process.env[k]);
+  if (missing.length) throw new Error(`Missing env vars: ${missing.join(', ')}`);
+
+  const t0                       = Date.now();
+  const token                    = await getShopifyToken();
+  const products                 = await fetchAllProducts(token);
+  const { content, breakdown }   = buildKnowledgeBase(products);
+
+  fs.writeFileSync(OUTPUT_FILE, content, 'utf8');
+  console.log(`  ✓ Saved KB (${(Buffer.byteLength(content) / 1024).toFixed(1)} KB)`);
+
+  const newFileId   = await uploadToVapi(content);
+  const patchResult = await patchAssistant(newFileId);
+
+  return {
+    totalProducts : products.length,
+    breakdown,
+    newFileId,
+    oldFileId     : VAPI_OLD_FILE(),
+    patchStatus   : patchResult.status,
+    elapsedMs     : Date.now() - t0,
+  };
+}
+
+module.exports = { runSync };
+
+// ── CLI entry point ───────────────────────────────────────────────────────────
+
+if (require.main === module) {
+  // Validate env vars immediately for CLI usage
+  const missing = ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET', 'VAPI_API_KEY']
+    .filter(k => !process.env[k]);
+  if (missing.length) {
+    console.error(`✗ Missing required environment variables: ${missing.join(', ')}`);
+    process.exit(1);
+  }
+
   console.log('═══════════════════════════════════════════════════');
   console.log('  Kymra Lighting — Sarah Product Sync v2');
   console.log('═══════════════════════════════════════════════════\n');
 
-  const token                = await getShopifyToken();
-  const products             = await fetchAllProducts(token);
-  const { content, breakdown } = buildKnowledgeBase(products);
-
-  fs.writeFileSync(OUTPUT_FILE, content, 'utf8');
-  const kb = (Buffer.byteLength(content) / 1024).toFixed(1);
-  console.log(`  ✓ Saved: ${OUTPUT_FILE} (${kb} KB)\n`);
-
-  const newFileId    = await uploadToVapi(content);
-  const patchStatus  = await patchAssistant(newFileId);
-  const elapsed      = ((Date.now() - t0) / 1000).toFixed(1);
-
-  console.log('\n═══════════════════════════════════════════════════');
-  console.log('  SYNC COMPLETE');
-  console.log('═══════════════════════════════════════════════════');
-  console.log(`  Total products          : ${products.length}`);
-  for (const [cat, n] of Object.entries(breakdown)) {
-    console.log(`    ${cat.padEnd(38)} ${n}`);
-  }
-  console.log(`  New Vapi file ID        : ${newFileId}`);
-  console.log(`  Old file ID removed     : ${VAPI_OLD_FILE_ID}`);
-  console.log(`  PATCH status            : ${patchStatus}`);
-  console.log(`  Time taken              : ${elapsed}s`);
-  console.log('═══════════════════════════════════════════════════\n');
+  runSync().then(result => {
+    console.log('\n═══════════════════════════════════════════════════');
+    console.log('  SYNC COMPLETE');
+    console.log('═══════════════════════════════════════════════════');
+    console.log(`  Total products  : ${result.totalProducts}`);
+    for (const [cat, n] of Object.entries(result.breakdown)) {
+      console.log(`    ${cat.padEnd(38)} ${n}`);
+    }
+    console.log(`  New file ID     : ${result.newFileId}`);
+    console.log(`  Old file ID     : ${result.oldFileId}`);
+    console.log(`  PATCH status    : ${result.patchStatus}`);
+    console.log(`  Time taken      : ${(result.elapsedMs / 1000).toFixed(1)}s`);
+    console.log('═══════════════════════════════════════════════════\n');
+  }).catch(err => { console.error('\n✗', err.message); process.exit(1); });
 }
-
-main().catch(err => { console.error('\n✗', err.message); process.exit(1); });
