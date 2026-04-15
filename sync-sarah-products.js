@@ -283,14 +283,32 @@ async function uploadToVapi(fileContent) {
 // ── Step 7: PATCH assistant ───────────────────────────────────────────────────
 
 async function patchAssistant(newFileId) {
-  console.log('Step 7 — Patching Sarah assistant...');
-  const payload = JSON.stringify({
-    model: {
-      provider      : 'openai',
-      model         : 'gpt-4o-mini',
-      knowledgeBase : { fileIds: [newFileId], provider: 'google' },
+  console.log('Step 7 — Patching Sarah assistant (safe merge)...');
+
+  // Step 1: GET current config so we never wipe prompt/tools/voice
+  const getRes = await httpsRequest(
+    `https://api.vapi.ai/assistant/${VAPI_ASSISTANT()}`,
+    {
+      method  : 'GET',
+      headers : { Authorization: `Bearer ${VAPI_KEY()}` },
+    }
+  );
+  if (getRes.status !== 200) throw new Error(`Failed to GET assistant: ${getRes.status}\n${getRes.body}`);
+  const current = JSON.parse(getRes.body);
+
+  // Step 2: Merge — only update KB file ID, preserve everything else
+  const updatedModel = {
+    ...current.model,
+    knowledgeBase: {
+      ...(current.model?.knowledgeBase || {}),
+      fileIds  : [newFileId],
+      provider : 'google',
     },
-  });
+  };
+
+  const payload = JSON.stringify({ model: updatedModel });
+
+  // Step 3: PATCH with fully merged config
   const res = await httpsRequest(
     `https://api.vapi.ai/assistant/${VAPI_ASSISTANT()}`,
     {
@@ -304,8 +322,11 @@ async function patchAssistant(newFileId) {
     payload
   );
   if (res.status !== 200) throw new Error(`Vapi PATCH failed — HTTP ${res.status}\n${res.body}`);
-  const attached = JSON.parse(res.body).model?.knowledgeBase?.fileIds || [];
-  console.log(`  ✓ PATCH 200 — KB files: ${JSON.stringify(attached)}`);
+  const data        = JSON.parse(res.body);
+  const attached    = data.model?.knowledgeBase?.fileIds || [];
+  const promptLen   = data.model?.messages?.[0]?.content?.length || 0;
+  const toolCount   = data.model?.toolIds?.length || 0;
+  console.log(`  ✓ PATCH 200 — KB: ${JSON.stringify(attached)}, prompt: ${promptLen} chars, tools: ${toolCount}`);
   return { status: res.status, newFileId };
 }
 
